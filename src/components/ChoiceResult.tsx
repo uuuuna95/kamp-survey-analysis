@@ -8,7 +8,6 @@ import { BarElement, CategoryScale, Chart as ChartJS, LinearScale, Tooltip } fro
 import { useMemo, useSyncExternalStore } from 'react';
 import { Bar } from 'react-chartjs-2';
 import { chartHeight, choiceChartData, choiceChartOptions, valueLabelPlugin } from '@/lib/survey/chart-config';
-import type { GroupedChoice } from '@/lib/survey/analyze';
 import type { ChoiceResult as ChoiceResultData } from '@/lib/survey/types';
 
 ChartJS.register(BarElement, CategoryScale, LinearScale, Tooltip);
@@ -25,58 +24,9 @@ const getServerDarkMode = () => false;
 
 interface ChoiceResultProps {
   result: ChoiceResultData;
-  /** 집단별 결과 (부서·직급을 골랐을 때만) */
-  groups?: GroupedChoice[] | undefined;
 }
 
-/** 집단별 결과 표: 보기 줄 × 집단 칸(응답 수 · 비율). 집단이 많으면 옆으로 넘겨 본다 */
-function GroupTable({ grouped }: { grouped: GroupedChoice }) {
-  const rows = grouped.groups[0]?.result.rows ?? [];
-  return (
-    <details data-role="group-results" data-group-role={grouped.role} className="group mt-4 rounded-lg border border-zinc-200 dark:border-zinc-800">
-      <summary className="cursor-pointer select-none px-3 py-2 text-sm font-medium text-zinc-800 hover:bg-zinc-50 dark:text-zinc-200 dark:hover:bg-zinc-800">
-        {grouped.label}별 결과 보기 <span className="text-zinc-600 dark:text-zinc-400">({grouped.groups.length}개 집단)</span>
-      </summary>
-      <div className="overflow-x-auto border-t border-zinc-200 p-3 dark:border-zinc-800">
-        <table className="w-full border-collapse text-sm">
-          <caption className="sr-only">{grouped.label}별 보기별 응답 수와 비율</caption>
-          <thead>
-            <tr className="border-b border-zinc-300 text-zinc-700 dark:border-zinc-700 dark:text-zinc-300">
-              <th scope="col" className="py-2 pr-4 text-left font-semibold">
-                보기
-              </th>
-              {grouped.groups.map((g) => (
-                <th key={g.name} scope="col" className="whitespace-nowrap px-3 py-2 text-right font-semibold">
-                  {g.name}
-                  <span className="block text-xs font-normal text-zinc-600 dark:text-zinc-400">응답 {g.result.totalSelections}건</span>
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {rows.map((row, i) => (
-              <tr key={String(row.optionNo)} className="border-b border-zinc-100 dark:border-zinc-800">
-                <th scope="row" className="py-2 pr-4 text-left font-normal text-zinc-900 dark:text-zinc-100">
-                  {row.label}
-                </th>
-                {grouped.groups.map((g) => {
-                  const cell = g.result.rows[i];
-                  return (
-                    <td key={g.name} className="whitespace-nowrap px-3 py-2 text-right tabular-nums text-zinc-900 dark:text-zinc-100">
-                      {cell.count}건 · {cell.percent.toFixed(1)}%
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-    </details>
-  );
-}
-
-export default function ChoiceResult({ result, groups }: ChoiceResultProps) {
+export default function ChoiceResult({ result }: ChoiceResultProps) {
   const dark = useSyncExternalStore(subscribeDarkMode, getDarkMode, getServerDarkMode);
   const { rows } = result;
   const data = useMemo(() => choiceChartData(rows), [rows]);
@@ -144,9 +94,6 @@ export default function ChoiceResult({ result, groups }: ChoiceResultProps) {
         />
       </div>
 
-      {groups?.map((grouped) => (
-        <GroupTable key={grouped.role} grouped={grouped} />
-      ))}
     </div>
   );
 }

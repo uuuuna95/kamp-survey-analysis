@@ -35,8 +35,8 @@ export async function downloadResultWorkbook(
   interpretations: Readonly<Record<number, Interpretation>>,
   now: Date = new Date(),
 ): Promise<string> {
-  const { renderChoiceChartPng, renderGroupChartPng } = await import('./chart-image');
-  const bytes = await buildWorkbook(analysis, { interpretations, renderChart: renderChoiceChartPng, renderGroupChart: renderGroupChartPng });
+  const { renderChoiceChartPng } = await import('./chart-image');
+  const bytes = await buildWorkbook(analysis, { interpretations, renderChart: renderChoiceChartPng });
   const fileName = resultFileName(now);
   saveBytes(bytes, fileName);
   return fileName;
