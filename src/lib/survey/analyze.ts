@@ -4,7 +4,7 @@
 //
 // 순서 (PRD 7번): ① 사번·부서·문항 파일에 없는 열 빼기 → ② 유형 추정 → ③ 이름 열 빼기 → ④ 집계
 
-import { aggregateChoice } from './aggregate';
+import { absorbsEtcOption, aggregateChoice } from './aggregate';
 import { inferColumnTypes } from './infer-type';
 import type { AnalyzedColumn, TypeInference } from './infer-type';
 import type { LoadedSurvey } from './load';
@@ -129,7 +129,9 @@ function textColumnFor(no: number, title: string, answers: (string | null)[], re
 function groupedOrNothing(c: AnalyzedColumn, participants: ParticipantColumn[], groupBy: readonly GroupRole[]): { groups?: GroupedChoice[] } {
   const result: GroupedChoice[] = [];
   // 집단 표는 모두 문항 전체의 보기 줄("기타" 포함)을 그대로 쓴다. 그 집단에 없는 보기는 0건·0.0%
-  const wholeRows = aggregateChoice(c.question, c.column.answers).rows;
+  // 마지막 "기타" 보기를 합칠지는 문항 전체 응답으로 정하고, 모든 집단에 똑같이 쓴다
+  const absorbEtc = absorbsEtcOption(c.question, c.column.answers);
+  const wholeRows = aggregateChoice(c.question, c.column.answers, absorbEtc).rows;
   const alignRows = (r: ChoiceResult): ChoiceResult => ({
     ...r,
     rows: wholeRows.map((base) => r.rows.find((x) => x.optionNo === base.optionNo) ?? { ...base, count: 0, percent: 0 }),
@@ -144,7 +146,7 @@ function groupedOrNothing(c: AnalyzedColumn, participants: ParticipantColumn[], 
       (members.get(name) ?? members.set(name, []).get(name)!).push(answer);
     });
     const groups = [...members.entries()]
-      .map(([name, answers]) => ({ name, result: alignRows(aggregateChoice(c.question, answers)) }))
+      .map(([name, answers]) => ({ name, result: alignRows(aggregateChoice(c.question, answers, absorbEtc)) }))
       .sort((x, y) => {
         if (x.name === NO_GROUP_NAME || y.name === NO_GROUP_NAME) return x.name === NO_GROUP_NAME ? 1 : -1;
         return y.result.respondents - x.result.respondents || x.name.localeCompare(y.name, 'ko');

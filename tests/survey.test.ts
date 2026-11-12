@@ -749,6 +749,84 @@ describe('작업 7 · 객관식 집계 (aggregate.ts)', () => {
     aggregateChoice(makeQuestion(3), answers);
     expect(answers).toEqual(['1,3', null, '2']);
   });
+
+  describe('마지막 보기 "기타"를 "기타" 줄에 합치기', () => {
+    const withLast = (label: string): Question => ({
+      no: 1,
+      title: '이유는?',
+      options: [
+        { no: 1, label: '가' },
+        { no: 2, label: '나' },
+        { no: 3, label: label },
+      ],
+      endsWithTextCue: false,
+    });
+    const rowsOf = (r: ReturnType<typeof aggregateChoice>) => r.rows.map((row) => [row.label, row.count, row.percent]);
+
+    it('글로 적은 "기타"가 있으면 "3. 기타" 줄을 없애고 그 건수를 "기타"에 더해 합계 100.0%를 맞춘다', () => {
+      const r = aggregateChoice(withLast('기타'), ['1', '2', '3', '직접 쓴 의견', '1,3', null]);
+      expect(rowsOf(r)).toEqual([
+        ['1. 가', 2, 33.3],
+        ['2. 나', 1, 16.7],
+        ['기타', 3, 50],
+      ]);
+      expect([r.totalSelections, r.multiAnswerCount, r.noAnswer]).toEqual([6, 1, 1]);
+      expect(r.rows.reduce((sum, row) => sum + row.percent, 0)).toBeCloseTo(100, 5);
+    });
+
+    it('"기타 답변", "기타 의견", "기타(직접 입력)"도 마지막 보기면 합친다', () => {
+      for (const label of ['기타 답변', '기타 의견', '기타(직접 입력)', ' 기 타 ']) {
+        const r = aggregateChoice(withLast(label), ['3', '의견']);
+        expect(rowsOf(r), label).toEqual([
+          ['1. 가', 0, 0],
+          ['2. 나', 0, 0],
+          ['기타', 2, 100],
+        ]);
+      }
+    });
+
+    it('"기타"로 세는 글 응답이 하나도 없으면 지금처럼 "3. 기타" 줄을 그대로 보여 준다', () => {
+      expect(rowsOf(aggregateChoice(withLast('기타'), ['1', '3', '3']))).toEqual([
+        ['1. 가', 1, 33.3],
+        ['2. 나', 0, 0],
+        ['3. 기타', 2, 66.7],
+      ]);
+    });
+
+    it('마지막 보기가 아니거나 "기타"로 시작하지 않으면 합치지 않는다', () => {
+      const middle: Question = { ...withLast('다'), options: [{ no: 1, label: '기타' }, { no: 2, label: '나' }, { no: 3, label: '다' }] };
+      expect(rowsOf(aggregateChoice(middle, ['1', '의견']))).toEqual([
+        ['1. 기타', 1, 50],
+        ['2. 나', 0, 0],
+        ['3. 다', 0, 0],
+        ['기타', 1, 50],
+      ]);
+      expect(rowsOf(aggregateChoice(withLast('그 밖의 기타'), ['3', '의견'])).map((r) => r[0])).toEqual(['1. 가', '2. 나', '3. 그 밖의 기타', '기타']);
+    });
+
+    it('집단별 표는 문항 전체의 결정을 따른다: 글 응답이 없는 집단도 "3. 기타"를 "기타"로 센다', () => {
+      // 기획부 1명만 글로 "기타"를 적었고(10명 중 1명이라 객관식으로 추정), 영업부는 "3"(기타)을 골랐다
+      const answers = ['3', '1', '1', '1', '1', '2', '2', '2', '2', '직접 쓴 의견'];
+      const raw = [header(qh(1)), ...answers.map((a) => person(a))];
+      raw.forEach((row, i) => {
+        if (i > 0) row[3] = i === 10 ? '기획부' : '영업부';
+      });
+      const survey: LoadedSurvey = { questions: [withLast('기타')], responses: parseResponses(raw), notes: [] };
+      const outcome = analyzeSurvey(survey, {}, [], { includeParticipants: false, groupBy: ['department'] }).questions[0].outcome;
+      if (outcome.type !== 'choice') throw new Error('객관식이어야 해요');
+      expect(rowsOf(outcome.result)).toEqual([
+        ['1. 가', 4, 40],
+        ['2. 나', 4, 40],
+        ['기타', 2, 20],
+      ]);
+      const sales = outcome.groups?.[0].groups.find((g) => g.name === '영업부');
+      expect(sales && rowsOf(sales.result)).toEqual([
+        ['1. 가', 4, 44.5], // 합계 100.0%를 맞추려고 가장 큰 줄(같으면 앞 줄)에 0.1을 더한다 (기존 규칙)
+        ['2. 나', 4, 44.4],
+        ['기타', 1, 11.1],
+      ]);
+    });
+  });
 });
 
 // =====================================================================

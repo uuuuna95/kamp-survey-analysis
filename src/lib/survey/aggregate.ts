@@ -8,6 +8,8 @@
 //   - 그 밖의 칸(글, 숫자와 글이 섞인 칸)은 칸 전체가 "기타" 1건
 //   - 중복응답 건수 = 선택이 2건 이상인 응답자 수
 //   - 비율 = 선택지별 선택 건수 ÷ 전체 선택 건수 (기타 포함), 소수 첫째 자리
+//   - 마지막 보기가 "기타"·"기타 답변"·"기타 의견"처럼 "기타"로 시작하고, 위 규칙으로 센 "기타"가 1건 이상이면
+//     그 보기("7. 기타")를 고른 건수를 "기타" 줄에 더하고 "7. 기타" 줄은 보여 주지 않는다 (합계는 그대로 전체 선택 건수·100.0%)
 
 import type { ChoiceResult, Question } from './types';
 
@@ -34,8 +36,35 @@ export function calcPercents(counts: number[]): number[] {
   return tenths.map((t) => t / 10);
 }
 
-/** 객관식 문항 하나를 집계한다. answers는 응답자 순서대로의 응답이고 빈 칸은 null */
-export function aggregateChoice(question: Question, answers: (string | null)[]): ChoiceResult {
+/** 보기 이름이 "기타", "기타 답변", "기타 의견", "기타(직접 입력)"처럼 "기타"로 시작하는가 */
+export function isEtcLabel(label: string): boolean {
+  return label.replace(/\s+/g, '').startsWith('기타');
+}
+
+/** 마지막 보기가 "기타"로 시작하면 그 보기 번호, 아니면 null */
+function etcOptionNo(question: Question): number | null {
+  const last = question.options[question.options.length - 1];
+  return last && isEtcLabel(last.label) ? last.no : null;
+}
+
+/**
+ * 마지막 "기타" 보기를 "기타" 줄에 합칠지: 마지막 보기가 "기타"로 시작하고,
+ * 응답 중에 "기타"로 세는 칸(글, 숫자와 글이 섞인 칸, 보기에 없는 번호)이 하나라도 있으면 합친다.
+ */
+export function absorbsEtcOption(question: Question, answers: (string | null)[]): boolean {
+  if (etcOptionNo(question) === null) return false;
+  const optionNos = new Set(question.options.map((o) => o.no));
+  return answers.some(
+    (answer) => answer !== null && (!NUMBER_LIST_RE.test(answer) || answer.split(',').some((n) => !optionNos.has(Number(n)))),
+  );
+}
+
+/**
+ * 객관식 문항 하나를 집계한다. answers는 응답자 순서대로의 응답이고 빈 칸은 null.
+ * absorbEtc: 마지막 "기타" 보기를 "기타" 줄에 합칠지. 주지 않으면 이 응답들로 정한다(absorbsEtcOption).
+ * 집단별 표처럼 문항 전체의 결정을 따라야 할 때는 직접 준다.
+ */
+export function aggregateChoice(question: Question, answers: (string | null)[], absorbEtc?: boolean): ChoiceResult {
   const counts = new Map<number, number>(question.options.map((o) => [o.no, 0]));
   let etc = 0;
   let noAnswer = 0;
@@ -57,7 +86,10 @@ export function aggregateChoice(question: Question, answers: (string | null)[]):
     }
   }
 
-  const rows = question.options.map((o) => ({
+  const absorbedNo = (absorbEtc ?? absorbsEtcOption(question, answers)) ? etcOptionNo(question) : null;
+  if (absorbedNo !== null) etc += counts.get(absorbedNo) ?? 0;
+
+  const rows = question.options.filter((o) => o.no !== absorbedNo).map((o) => ({
     optionNo: o.no as number | 'etc',
     label: `${o.no}. ${o.label}`,
     count: counts.get(o.no) ?? 0,
