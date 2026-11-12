@@ -37,10 +37,18 @@ export interface GroupedChoice {
   groups: { name: string; result: ChoiceResult }[];
 }
 
+/** 주관식·서술형 문항의 집단별 응답 한 종류(부서 또는 직급) */
+export interface GroupedText {
+  role: GroupRole;
+  label: string;
+  /** 집단마다 그 집단 응답자의 응답. respondentNos는 응답자 순번(1부터, TextResult.views의 respondent와 같은 값) */
+  groups: { name: string; respondents: number; answers: string[]; respondentNos: number[] }[];
+}
+
 /** 문항 하나의 집계 결과. 유형에 따라 모양이 다르다 */
 export type QuestionOutcome =
   | { type: 'choice'; result: ChoiceResult; /** 집단별 결과 (고른 경우에만) */ groups?: GroupedChoice[] }
-  | { type: 'text'; result: TextResult };
+  | { type: 'text'; result: TextResult; /** 집단별 응답 (고른 경우에만) */ groups?: GroupedText[] };
 
 /** 분석에 쓰는 문항 하나: 문항 + 유형 추정 + 집계 결과 */
 export interface AnalyzedQuestion {
@@ -156,6 +164,35 @@ function groupedOrNothing(c: AnalyzedColumn, participants: ParticipantColumn[], 
   return result.length > 0 ? { groups: result } : {};
 }
 
+/** 응답자를 집단 이름별로 나눈다: [집단 이름, 응답자 순서(0부터) 목록]. 응답자가 많은 집단부터, (미기재)는 맨 뒤 */
+function groupMembers(column: ParticipantColumn, count: number): [string, number[]][] {
+  const members = new Map<string, number[]>();
+  for (let i = 0; i < count; i++) {
+    const name = column.answers[i] ?? NO_GROUP_NAME;
+    (members.get(name) ?? members.set(name, []).get(name)!).push(i);
+  }
+  return [...members.entries()].sort(([x, xs], [y, ys]) => {
+    if (x === NO_GROUP_NAME || y === NO_GROUP_NAME) return x === NO_GROUP_NAME ? 1 : -1;
+    return ys.length - xs.length || x.localeCompare(y, 'ko');
+  });
+}
+
+/** 고른 참여자 정보(부서·직급)별로 주관식·서술형 응답을 나눈다. 만들 수 있는 종류가 없으면 groups를 만들지 않는다 */
+function groupedTextOrNothing(c: AnalyzedColumn, participants: ParticipantColumn[], groupBy: readonly GroupRole[]): { groups?: GroupedText[] } {
+  const result: GroupedText[] = [];
+  for (const role of GROUP_ROLES) {
+    if (!groupBy.includes(role)) continue;
+    const column = participants.find((p) => p.role === role);
+    if (!column || column.answers.every((v) => v === null)) continue;
+    const groups = groupMembers(column, c.column.answers.length).map(([name, indexes]) => {
+      const answered = indexes.filter((i) => c.column.answers[i] !== null);
+      return { name, respondents: indexes.length, answers: answered.map((i) => c.column.answers[i] as string), respondentNos: answered.map((i) => i + 1) };
+    });
+    result.push({ role, label: column.header, groups });
+  }
+  return result.length > 0 ? { groups: result } : {};
+}
+
 /** 빠진 열 후보 하나: 목록에 보여 줄 표시 + 되돌릴 때 쓸 문항 */
 interface Candidate {
   excluded: ExcludedColumn;
@@ -243,7 +280,11 @@ export function analyzeSurvey(
               result: aggregateChoice(c.question, c.column.answers),
               ...(participant === null && groupBy.length > 0 ? groupedOrNothing(c, responses.participants, groupBy) : {}),
             }
-          : { type: 'text', result: buildTextResult(c.column.answers) },
+          : {
+              type: 'text',
+              result: buildTextResult(c.column.answers),
+              ...(participant === null && groupBy.length > 0 ? groupedTextOrNothing(c, responses.participants, groupBy) : {}),
+            },
     };
   };
 

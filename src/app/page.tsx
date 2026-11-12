@@ -10,6 +10,7 @@ import AiPanel from '@/components/AiPanel';
 import ChoiceResult from '@/components/ChoiceResult';
 import DownloadButton from '@/components/DownloadButton';
 import ExcludedColumns from '@/components/ExcludedColumns';
+import GroupTrends from '@/components/GroupTrends';
 import QuestionCard from '@/components/QuestionCard';
 import ResultSummary from '@/components/ResultSummary';
 import TextResult from '@/components/TextResult';
@@ -19,6 +20,7 @@ import type { LoadedUpload } from '@/components/UploadPanel';
 import { analyzeSurvey } from '@/lib/survey/analyze';
 import type { TypeOverrides } from '@/lib/survey/analyze';
 import { doneInterpretations, staleQuestionNos } from '@/lib/ai/client';
+import { buildGroupTrends } from '@/lib/survey/group-trends';
 
 export default function Home() {
   const [loaded, setLoaded] = useState<LoadedUpload | null>(null);
@@ -38,6 +40,8 @@ export default function Home() {
 
   // 엑셀에 넣을 AI 해석: 지금 화면에 해석이 있는 문항만 (유형을 바꿔서 비워진 문항은 들어 있지 않다)
   const interpretations = doneInterpretations(ai.items);
+  // 집단별 경향 (부서·직급을 골랐을 때만). 주관식·서술형 집단별 주요 의견은 지금 있는 AI 해석으로 나눈다
+  const trends = useMemo(() => (analysis ? buildGroupTrends(analysis, doneInterpretations(ai.items)) : []), [analysis, ai.items]);
 
   /**
    * 유형이나 되돌린 열을 바꾼다 (작업 17·18·19).
@@ -98,6 +102,8 @@ export default function Home() {
               void ai.run(password);
             }}
           />
+
+          <GroupTrends trends={trends} />
 
           <section aria-labelledby="results-title" className="mt-6">
             <h2 id="results-title" className="text-lg font-bold text-zinc-900 dark:text-zinc-100">

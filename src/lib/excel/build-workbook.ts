@@ -1,4 +1,5 @@
 // Design Ref: §3 ⑥ 엑셀 만들기 / §6 — 결과를 시트 3개(문항별 요약 / 객관식 결과 / 주관식·서술형 결과)가 있는 엑셀 파일로 만든다.
+// 부서별·직급별로 나눠 보기를 고른 경우에는 그 종류마다 "부서별 경향"·"직급별 경향" 시트를 따로 더한다(경향 요약 + 문항별 집단 표·차트).
 // Plan SC: SC-6 — 화면과 100% 같은 숫자. 화면을 그리는 Analysis(집계 결과)에서 그대로 옮겨 적고 다시 계산하지 않는다.
 //          PRD Must 3 — 분석에서 뺀 열(사번·이름·부서 등)은 넣지 않는다. 사용자가 "문항으로 되돌린" 열만 문항으로 들어간다.
 //
@@ -7,12 +8,20 @@
 
 import type { Buffer as ExcelBuffer } from 'exceljs';
 import type { AnalyzedQuestion, Analysis } from '../survey/analyze';
-import { chartHeight } from '../survey/chart-config';
+import { chartHeight, groupChartHeight } from '../survey/chart-config';
+import type { GroupChartInput } from '../survey/chart-config';
+import type { GroupRole } from '../survey/analyze';
+import { buildGroupTrends } from '../survey/group-trends';
+import type { GroupTrend } from '../survey/group-trends';
 import type { ChoiceResult, Interpretation } from '../survey/types';
 
 export const SHEET_SUMMARY = '문항별 요약';
 export const SHEET_CHOICE = '객관식 결과';
 export const SHEET_TEXT = '주관식·서술형 결과';
+/** 집단별 경향 시트 이름 (고른 종류만 만든다) */
+export const SHEET_GROUP: Readonly<Record<GroupRole, string>> = { department: '부서별 경향', rank: '직급별 경향' };
+/** 엑셀 안 집단별 경향 차트 그림의 가로 크기(px) */
+export const GROUP_CHART_IMAGE_WIDTH = 720;
 
 /** 엑셀 안 차트 그림의 가로 크기(px). 세로는 보기 줄 수에 맞춘 chartHeight */
 export const CHART_IMAGE_WIDTH = 640;
@@ -22,6 +31,8 @@ export interface BuildOptions {
   interpretations?: Readonly<Record<number, Interpretation>>;
   /** 객관식 집계 결과를 차트 그림(PNG 바이트)으로 만든다. null이면 그 문항은 그림 없이 */
   renderChart?: (result: ChoiceResult) => Promise<Uint8Array | null>;
+  /** 집단별 경향 차트(집단마다 보기 비율을 이어 붙인 가로 막대)를 그림(PNG 바이트)으로 만든다 */
+  renderGroupChart?: (input: GroupChartInput) => Promise<Uint8Array | null>;
 }
 
 const TYPE_LABEL = { choice: '객관식', text: '주관식·서술형' } as const;
@@ -155,19 +166,6 @@ export async function buildWorkbook(analysis: Analysis, options: BuildOptions = 
       choiceSheet.addImage(imageId, { tl: { col: 4, row: start - 1 }, ext: { width: CHART_IMAGE_WIDTH, height } });
       row = Math.max(row, start + Math.ceil(height / ROW_PX) + 1);
     }
-    // 집단별 결과 (부서·직급을 골랐을 때만): 그림 아래에 집단마다 같은 모양의 표를 쓴다
-    for (const grouped of item.outcome.groups ?? []) {
-      row++;
-      choiceSheet.getCell(row, 1).value = `${grouped.label}별 결과`;
-      choiceSheet.getCell(row, 1).font = { bold: true };
-      row++;
-      for (const g of grouped.groups) {
-        choiceSheet.getCell(row, 1).value = `${grouped.label}: ${g.name} (응답자 ${g.result.respondents}명 · 응답 ${g.result.totalSelections}건)`;
-        choiceSheet.getCell(row, 1).font = { italic: true };
-        row++;
-        row = writeChoiceTable(choiceSheet, row, g.result) + 1;
-      }
-    }
     row++; // 문항 사이 빈 줄
   }
 
@@ -206,6 +204,120 @@ export async function buildWorkbook(analysis: Analysis, options: BuildOptions = 
     });
   }
 
+  // ---------- 시트 4~: 부서별·직급별 경향 (고른 경우에만) ----------
+  for (const trend of buildGroupTrends(analysis, interpretations)) {
+    await writeGroupSheet(workbook, trend, options);
+  }
+
   const buffer = await workbook.xlsx.writeBuffer();
   return new Uint8Array(buffer as ArrayBuffer);
+}
+
+/** 부서별·직급별 경향 시트 하나: 경향 요약 → 객관식 문항별 집단 표와 차트 → 주관식·서술형 문항별 집단 응답 */
+async function writeGroupSheet(workbook: import('exceljs').Workbook, trend: GroupTrend, options: BuildOptions): Promise<void> {
+  const sheet = workbook.addWorksheet(SHEET_GROUP[trend.role]);
+  sheet.columns = [{ width: 22 }, { width: 10 }, { width: 10 }, { width: 26 }];
+  let row = 1;
+  const line = (value: string, font?: Partial<import('exceljs').Font>, wrap = false) => {
+    const cell = sheet.getCell(row, 1);
+    cell.value = value;
+    if (font) cell.font = font;
+    if (wrap) {
+      sheet.mergeCells(row, 1, row, 8);
+      cell.alignment = { wrapText: true, vertical: 'top' };
+      sheet.getRow(row).height = Math.max(1, Math.ceil(Array.from(value).length / 70)) * 15;
+    }
+    row++;
+  };
+
+  line(`${trend.label}별 경향`, { bold: true, size: 14 });
+  line(trend.groups.map((g) => `${g.name} ${g.respondents}명`).join(' · '), undefined, true);
+  line('숫자는 앱이 직접 센 집단별 결과예요. 부서·직급 정보는 AI에 보내지 않아요. 주관식·서술형의 집단별 주요 의견은 AI가 묶은 의견을 집단별로 나눠 센 것이에요.', { color: { argb: 'FF52525B' } }, true);
+  row++;
+  line('경향 요약', { bold: true, size: 12 });
+  for (const h of trend.highlights) line(`• ${h}`, undefined, true);
+  row++;
+
+  for (const q of trend.choice) {
+    line(`Q${q.no}. ${q.title}`, { bold: true, size: 12 });
+    const headers = ['집단', '응답자', '응답 건수', '가장 많이 고른 보기', ...q.labels.flatMap((l) => [`${l} 응답 수`, `${l} 비율(%)`])];
+    headers.forEach((h, i) => {
+      const cell = sheet.getCell(row, i + 1);
+      cell.value = h;
+      cell.font = { bold: true };
+      cell.border = { bottom: { style: 'thin' } };
+      cell.alignment = { wrapText: true, vertical: 'top' };
+      if (i >= 4) sheet.getColumn(i + 1).width = Math.max(sheet.getColumn(i + 1).width ?? 10, 12);
+    });
+    row++;
+    const overallAnswered = q.overall.counts.reduce((sum, c) => sum + c, 0);
+    const rowsToWrite = [
+      { name: '전체', respondents: null as number | null, answered: overallAnswered, ...q.overall },
+      ...q.groups,
+    ];
+    for (const g of rowsToWrite) {
+      const values: (string | number | null)[] = [
+        g.name,
+        g.respondents,
+        g.answered,
+        g.top ? `${g.top.label} (${g.top.percent.toFixed(1)}%)` : '-',
+        ...g.counts.flatMap((c, i) => [c, g.percents[i]]),
+      ];
+      values.forEach((v, i) => {
+        const cell = sheet.getCell(row, i + 1);
+        cell.value = v;
+        if (i >= 4 && i % 2 === 1) cell.numFmt = '0.0';
+        if (g.name === '전체') cell.font = { bold: true };
+      });
+      row++;
+    }
+    const answeredGroups = q.groups.filter((g) => g.answered > 0);
+    const image = answeredGroups.length > 0 && options.renderGroupChart ? await options.renderGroupChart({ labels: q.labels, groups: answeredGroups }) : null;
+    if (image) {
+      const height = groupChartHeight(answeredGroups.length, q.labels.length);
+      const imageId = workbook.addImage({ buffer: image as unknown as ExcelBuffer, extension: 'png' });
+      sheet.addImage(imageId, { tl: { col: 0, row: row }, ext: { width: GROUP_CHART_IMAGE_WIDTH, height } });
+      row += Math.ceil(height / ROW_PX) + 1;
+    }
+    row++;
+  }
+
+  for (const q of trend.text) {
+    line(`Q${q.no}. ${q.title} (주관식·서술형)`, { bold: true, size: 12 });
+    ['집단', '응답 수', '', '주요 의견 (AI 정리, 집단 안 응답자 수)'].forEach((h, i) => {
+      const cell = sheet.getCell(row, i + 1);
+      cell.value = h;
+      cell.font = { bold: true };
+      cell.border = { bottom: { style: 'thin' } };
+    });
+    row++;
+    for (const g of q.groups) {
+      sheet.getCell(row, 1).value = g.name;
+      sheet.getCell(row, 2).value = g.answers.length;
+      const opinionText = g.opinions.map((o) => `${o.summary} (${o.count}명)`).join('\n');
+      const cell = sheet.getCell(row, 4);
+      cell.value = opinionText || (q.hasOpinions ? '-' : 'AI 해석을 만들면 채워져요');
+      cell.alignment = { wrapText: true, vertical: 'top' };
+      sheet.getRow(row).height = Math.max(1, g.opinions.length) * 15;
+      row++;
+    }
+    row++;
+    ['집단', '응답 원문'].forEach((h, i) => {
+      const cell = sheet.getCell(row, i === 0 ? 1 : 2);
+      cell.value = h;
+      cell.font = { bold: true };
+    });
+    row++;
+    for (const g of q.groups) {
+      for (const answer of g.answers) {
+        sheet.getCell(row, 1).value = g.name;
+        sheet.mergeCells(row, 2, row, 8);
+        const cell = sheet.getCell(row, 2);
+        cell.value = answer;
+        cell.alignment = { wrapText: true, vertical: 'top' };
+        row++;
+      }
+    }
+    row++;
+  }
 }

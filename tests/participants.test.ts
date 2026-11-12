@@ -7,7 +7,8 @@ import { readFileSync } from 'node:fs';
 import ExcelJS from 'exceljs';
 import { describe, expect, it } from 'vitest';
 import { buildInterpretQuestions } from '../src/lib/ai/client';
-import { SHEET_CHOICE, SHEET_SUMMARY, SHEET_TEXT, buildWorkbook } from '../src/lib/excel/build-workbook';
+import { SHEET_CHOICE, SHEET_GROUP, SHEET_SUMMARY, SHEET_TEXT, buildWorkbook } from '../src/lib/excel/build-workbook';
+import { GAP_POINTS, buildGroupTrends } from '../src/lib/survey/group-trends';
 import { NO_GROUP_NAME, analyzeSurvey } from '../src/lib/survey/analyze';
 import type { Analysis } from '../src/lib/survey/analyze';
 import { loadSurvey } from '../src/lib/survey/load';
@@ -188,10 +189,18 @@ describe('집단별 집계 (부서·직급) — 정답표와 같다', () => {
     }
   });
 
-  it('주관식·서술형 문항과 참여자 정보 카드에는 집단별 결과가 없다 / 객관식을 주관식으로 바꾸면 집단별 결과도 없어진다', () => {
+  it('참여자 정보 카드에는 집단별 결과가 없고, 주관식·서술형 문항은 집단별 응답 목록을 가진다 / 객관식을 주관식으로 바꾸면 응답 목록으로 바뀐다', () => {
     const a = analyzeSurvey(survey, { 3: 'text' }, [], { includeParticipants: true, groupBy: ['department', 'rank'] });
     for (const q of a.questions) {
-      if (q.outcome.type === 'text') expect('groups' in q.outcome).toBe(false);
+      if (q.participant !== null) expect('groups' in q.outcome).toBe(false);
+      else if (q.outcome.type === 'text') {
+        expect(q.outcome.groups?.map((g) => g.role)).toEqual(['department', 'rank']);
+        // 집단별 응답을 모두 모으면 문항 전체 응답과 같다
+        for (const g of q.outcome.groups!) {
+          expect(g.groups.reduce((sum, x) => sum + x.answers.length, 0)).toBe(q.outcome.result.answers.length);
+          expect(g.groups.reduce((sum, x) => sum + x.respondents, 0)).toBe(q.outcome.result.respondents);
+        }
+      }
     }
     expect(card(a, 3).outcome.type).toBe('text');
     const q4 = card(a, 4).outcome;
@@ -251,31 +260,34 @@ const allText = (wb: ExcelJS.Workbook): string => {
 };
 
 describe('엑셀 — 집단별 결과와 참여자 정보', () => {
-  it('집단별 결과를 고르면 객관식 시트에 부서별·직급별 표가 있고, 숫자가 화면(정답표)과 같다', async () => {
-    const ws = (await build(grouped)).getWorksheet(SHEET_CHOICE)!;
-    for (const q of expectedChoices.slice(0, 6)) {
-      const top = findRow(ws, `Q${q.no}. ${q.title}`);
-      for (const [label, role] of [['부서', 'department'], ['직급', 'rank']] as const) {
-        let r = findRow(ws, `${label}별 결과`, top);
-        expect(r, `Q${q.no} ${label}별 결과`).toBeGreaterThan(top);
-        r++;
-        for (const g of q.groupResults![role]) {
-          expect(val(ws, r, 1)).toBe(`${label}: ${g.name} (응답자 ${g.respondents}명 · 응답 ${g.totalSelections}건)`);
-          // 표: 제목 줄, 보기 줄들, 합계 줄
-          expect([val(ws, r + 1, 1), val(ws, r + 1, 2), val(ws, r + 1, 3)]).toEqual(['보기', '응답 수', '비율(%)']);
-          g.rows.forEach((row, i) => expect([val(ws, r + 2 + i, 1), val(ws, r + 2 + i, 2), val(ws, r + 2 + i, 3)]).toEqual([row.label, row.count, row.percent]));
-          const total = r + 2 + g.rows.length;
-          expect([val(ws, total, 1), val(ws, total, 2)]).toEqual(['합계', g.totalSelections]);
-          r = total + 2; // 합계 줄 + 빈 줄
-        }
+  it('집단별 결과를 고르면 "부서별 경향"·"직급별 경향" 시트가 따로 생기고, 문항별 집단 표의 숫자가 화면(정답표)과 같다', async () => {
+    const wb = await build(grouped);
+    expect(wb.worksheets.map((w) => w.name)).toEqual([SHEET_SUMMARY, SHEET_CHOICE, SHEET_TEXT, SHEET_GROUP.department, SHEET_GROUP.rank]);
+    // 객관식 시트에는 더 이상 집단별 표를 넣지 않는다
+    expect(findRow(wb.getWorksheet(SHEET_CHOICE)!, '부서별 결과')).toBe(-1);
+    for (const [label, role] of [['부서', 'department'], ['직급', 'rank']] as const) {
+      const ws = wb.getWorksheet(SHEET_GROUP[role])!;
+      expect(val(ws, 1, 1)).toBe(`${label}별 경향`);
+      expect(findRow(ws, '경향 요약')).toBeGreaterThan(0);
+      for (const q of expectedChoices) {
+        const top = findRow(ws, `Q${q.no}. ${q.title}`);
+        expect(top, `Q${q.no}`).toBeGreaterThan(0);
+        expect(val(ws, top + 1, 1)).toBe('집단');
+        expect(val(ws, top + 2, 1)).toBe('전체');
+        q.groupResults![role].forEach((g, i) => {
+          const r = top + 3 + i;
+          expect([val(ws, r, 1), val(ws, r, 2), val(ws, r, 3)]).toEqual([g.name, g.respondents, g.totalSelections]);
+          g.rows.forEach((row, k) => expect([val(ws, r, 5 + 2 * k), val(ws, r, 6 + 2 * k)]).toEqual([row.count, row.percent]));
+        });
       }
     }
   });
 
   it('집단별 결과를 고르지 않으면 엑셀에도 없다', async () => {
     const text = allText(await build(base));
-    expect(text).not.toContain('부서별 결과');
-    expect(text).not.toContain('직급별 결과');
+    expect(text).not.toContain('부서별 경향');
+    expect(text).not.toContain('직급별 경향');
+    expect((await build(base)).worksheets).toHaveLength(3);
   });
 
   it('참여자 정보를 반영하면 주관식·서술형 시트에 열마다 목록이 들어가고 요약 시트에도 나오며, 반영하지 않으면 값이 없다', async () => {
@@ -289,5 +301,64 @@ describe('엑셀 — 집단별 결과와 참여자 정보', () => {
     // 반영하지 않으면 이름 값이 파일 어디에도 없다
     const without = allText(await build(base));
     for (const name of names) expect(without).not.toContain(name);
+  });
+});
+
+describe('집단별 경향 요약 (group-trends.ts)', () => {
+  const trends = buildGroupTrends(grouped);
+
+  it('고른 종류(부서·직급)마다 경향이 하나씩 있고, 객관식·주관식 문항이 모두 들어간다', () => {
+    expect(trends.map((t) => t.role)).toEqual(['department', 'rank']);
+    for (const trend of trends) {
+      expect(trend.choice.map((q) => q.no)).toEqual(expectedChoices.map((q) => q.no));
+      expect(trend.text.length).toBe(expected.questions.filter((q) => q.type === 'text').length);
+      expect(trend.highlights.length).toBeGreaterThan(0);
+    }
+    expect(buildGroupTrends(base)).toEqual([]);
+  });
+
+  it('집단 숫자는 이미 센 집단별 결과(정답표) 그대로이고, 가장 많이 고른 보기를 맞게 찾는다', () => {
+    for (const trend of trends) {
+      for (const q of trend.choice) {
+        const want = expectedChoices.find((e) => e.no === q.no)!.groupResults![trend.role];
+        expect(q.groups.map((g) => [g.name, g.counts, g.percents])).toEqual(want.map((g) => [g.name, g.rows.map((r) => r.count), g.rows.map((r) => r.percent)]));
+        for (const g of q.groups) {
+          if (!g.top) continue;
+          const max = Math.max(...g.counts);
+          for (const label of g.top.label.split('·')) expect(g.counts[q.labels.indexOf(label)]).toBe(max);
+        }
+      }
+    }
+  });
+
+  it('경향 요약 문장은 전체와 다른 보기를 고른 집단이나 차이가 큰 집단만 적는다', () => {
+    for (const trend of trends) {
+      for (const line of trend.highlights) {
+        if (line.startsWith('객관식 문항마다')) continue;
+        expect(line).toMatch(/^Q\d+ /);
+        expect(line).toMatch(/와 달라요|%p (높아요|낮아요)|가장 많이 나온 의견/);
+        const gap = /(\d+\.\d)%p/.exec(line);
+        if (gap) expect(Number(gap[1])).toBeGreaterThanOrEqual(GAP_POINTS);
+        expect(line).not.toContain(NO_GROUP_NAME);
+      }
+    }
+  });
+
+  it('주관식·서술형은 AI가 묶은 의견을 집단별 응답자로 나눠 세고, AI 해석이 없으면 의견 없이 응답만 있다', () => {
+    const textItem = grouped.questions.find((q) => q.outcome.type === 'text' && q.participant === null)!;
+    if (textItem.outcome.type !== 'text') throw new Error();
+    const views = textItem.outcome.result.views;
+    const opinion = { summary: '전부 묶은 의견', viewIds: views.map((v) => v.id), count: new Set(views.map((v) => v.respondent)).size };
+    const withAi = buildGroupTrends(grouped, { [textItem.question.no]: { opinions: [opinion] } });
+    for (const trend of withAi) {
+      const q = trend.text.find((x) => x.no === textItem.question.no)!;
+      expect(q.hasOpinions).toBe(true);
+      // 집단별 의견 응답자 수의 합 = 의견 전체 응답자 수
+      expect(q.groups.reduce((sum, g) => sum + (g.opinions[0]?.count ?? 0), 0)).toBe(opinion.count);
+      expect(trend.highlights.some((l) => l.includes('전부 묶은 의견'))).toBe(true);
+    }
+    const noAi = trends[0].text.find((x) => x.no === textItem.question.no)!;
+    expect(noAi.hasOpinions).toBe(false);
+    expect(noAi.groups.every((g) => g.opinions.length === 0)).toBe(true);
   });
 });
