@@ -22,7 +22,7 @@ import {
 import { inferColumnTypes, inferQuestionType, isChoiceAnswer } from '../src/lib/survey/infer-type';
 import { checkFileName, loadSurvey } from '../src/lib/survey/load';
 import type { LoadedSurvey } from '../src/lib/survey/load';
-import { hasTextCue, parseQuestions, parseResponses, readFirstSheetRows } from '../src/lib/survey/parse';
+import { hasTextCue, parseQuestions, parseResponses, readFirstSheet, readFirstSheetRows } from '../src/lib/survey/parse';
 import {
   looksLikeDepartment,
   looksLikeIdNumber,
@@ -71,7 +71,8 @@ const expectedChoice = expected.questions.filter((q): q is ExpectedChoice => q.t
 const expectedText = expected.questions.filter((q): q is ExpectedText => q.type === 'text');
 
 // 예시 파일을 읽는 것부터 차례로 돌린 결과 (5 → 6 → 7 → 8번 작업의 순서)
-const parsedQuestions = parseQuestions(await readFirstSheetRows(fixture('예시 문항.xlsx')));
+const questionSheet = await readFirstSheet(fixture('예시 문항.xlsx'));
+const parsedQuestions = parseQuestions(questionSheet.rows, questionSheet.bold);
 const parsedResponses = parseResponses(await readFirstSheetRows(fixture('예시 원본.xlsx')));
 const firstPass = removeInfoColumns(parsedResponses.columns, parsedQuestions.questions);
 const analyzed = inferColumnTypes(firstPass.kept, parsedQuestions.questions);
@@ -183,6 +184,87 @@ describe('작업 3 · 문항 파일 읽기 (parse.ts)', () => {
     expect(r.questions[0].options).toEqual([{ no: 1, label: '가' }]);
     expect(r.warnings).toHaveLength(1);
     expect(r.duplicateCount).toBe(1);
+  });
+
+  describe('굵은 글씨 모양의 문항 파일 (실제 KAMP 문항 파일)', () => {
+    /** 줄 목록과 굵은 글씨 표시를 만든다. ['B', 글]은 굵은 글씨 줄 */
+    const sheetOf = (lines: (string | ['B', string] | null)[]) => ({
+      rows: lines.map((l) => [l === null ? null : Array.isArray(l) ? l[1] : l]),
+      bold: lines.map((l) => [Array.isArray(l)]),
+    });
+
+    it('굵은 "1. 질문"이 문항이고, 그 아래 줄이 위에서부터 1, 2, 3…번 보기다', () => {
+      const s = sheetOf([
+        ['B', '1. 온라인 교육 시스템에 얼마나 자주 접속하십니까?'],
+        '거의 매일',
+        '주 1~2회',
+        '월 1~2회',
+        ['B', '2. 온라인 교육에 만족하십니까?'],
+        '만족',
+        '불만족',
+      ]);
+      const r = parseQuestions(s.rows, s.bold);
+      expect(r.questions).toEqual([
+        {
+          no: 1,
+          title: '온라인 교육 시스템에 얼마나 자주 접속하십니까?',
+          options: [
+            { no: 1, label: '거의 매일' },
+            { no: 2, label: '주 1~2회' },
+            { no: 3, label: '월 1~2회' },
+          ],
+          endsWithTextCue: false,
+        },
+        { no: 2, title: '온라인 교육에 만족하십니까?', options: [{ no: 1, label: '만족' }, { no: 2, label: '불만족' }], endsWithTextCue: false },
+      ]);
+      expect(r.warnings).toEqual([]);
+    });
+
+    it('굵은 문항 줄 바로 아래에 다음 굵은 문항 줄이 오면 보기 없는 주관식·서술형이다', () => {
+      const s = sheetOf([['B', '7. 의견을 자유롭게 남겨주세요.'], ['B', '8. 사번을 입력해주세요.'], null]);
+      const r = parseQuestions(s.rows, s.bold);
+      expect(r.questions.map((q) => [q.no, q.options.length, q.endsWithTextCue])).toEqual([
+        [7, 0, false],
+        [8, 0, true],
+      ]);
+    });
+
+    it('질문 속 괄호·따옴표와 "10년 이상" 같은 숫자로 시작하는 보기를 그대로 읽는다', () => {
+      const s = sheetOf([['B', '5. (4번 "그렇지 않다" 선택 시) 이유는?'], '1년 미만', '10년 이상', '3. 기타']);
+      const r = parseQuestions(s.rows, s.bold);
+      expect(r.questions[0].title).toBe('(4번 "그렇지 않다" 선택 시) 이유는?');
+      expect(r.questions[0].options).toEqual([
+        { no: 1, label: '1년 미만' },
+        { no: 2, label: '10년 이상' },
+        { no: 3, label: '기타' }, // 같은 번호가 앞에 적혀 있으면 번호를 뗀다
+      ]);
+    });
+
+    it('첫 문항 앞의 굵은 제목·안내 글은 건너뛰고, 중복 번호 문항은 보기까지 건너뛴다', () => {
+      const s = sheetOf([['B', '교육 만족도 조사'], '안내 문구', ['B', '1. 첫째'], '가', ['B', '1. 둘째'], '나', ['B', '2. 셋째'], '다']);
+      const r = parseQuestions(s.rows, s.bold);
+      expect(r.questions.map((q) => [q.no, q.title, q.options.map((o) => o.label)])).toEqual([
+        [1, '첫째', ['가']],
+        [2, '셋째', ['다']],
+      ]);
+      expect(r.duplicateCount).toBe(1);
+      expect(r.warnings).toHaveLength(1);
+    });
+
+    it('엑셀 파일에서 굵은 글씨(칸 서식·서식 있는 글 모두)를 읽어 문항을 찾는다', async () => {
+      const workbook = new ExcelJS.Workbook();
+      const sheet = workbook.addWorksheet('sheet1');
+      sheet.addRow(['1. 만족하십니까?']).getCell(1).font = { bold: true };
+      sheet.addRow(['만족']);
+      sheet.addRow(['불만족']);
+      sheet.addRow([{ richText: [{ text: '2. 의견을 ', font: { bold: true } }, { text: '남겨주세요.', font: { bold: true } }] }]);
+      const read = await readFirstSheet(new Uint8Array(await workbook.xlsx.writeBuffer()));
+      const r = parseQuestions(read.rows, read.bold);
+      expect(r.questions.map((q) => [q.no, q.title, q.options.length])).toEqual([
+        [1, '만족하십니까?', 2],
+        [2, '의견을 남겨주세요.', 0],
+      ]);
+    });
   });
 
   it('내용이 없으면 문항 0개', () => {
@@ -823,6 +905,53 @@ describe('작업 10 · 올린 파일 읽기와 확인 (load.ts)', () => {
   };
   const goodQuestions = [[1, '만족하십니까?'], [null, '1. 예'], [null, '2. 아니오'], [2, '의견을 입력해주세요.']];
   const goodRaw = [header(qh(1), qh(2)), person('1', '좋다'), person('2', null)];
+
+  it('굵은 글씨 문항 파일과 "문항번호N" 원본을 짝지어 응답 수·비율·중복응답·무응답을 맞게 센다', async () => {
+    const qBook = new ExcelJS.Workbook();
+    const qSheet = qBook.addWorksheet('sheet1');
+    const title = (text: string) => (qSheet.addRow([text]).getCell(1).font = { bold: true });
+    title('1. 얼마나 자주 접속하십니까?');
+    ['거의 매일', '주 1~2회', '월 1~2회', '거의 활용하지 않음'].forEach((o) => qSheet.addRow([o]));
+    title('2. 불편한 이유는 무엇인가요?');
+    ['사용 방법', '콘텐츠 부족', '시간 부족'].forEach((o) => qSheet.addRow([o]));
+    title('3. 의견을 자유롭게 남겨주세요.');
+    title('4. 사번을 입력해주세요.');
+    const questionFile = new Uint8Array(await qBook.xlsx.writeBuffer());
+    const raw = [
+      header(qh(1), qh(2), qh(3), qh(4)),
+      person(2, null, null, 111111),
+      person(3, '1,3', '화면이 편리하다', '022222'),
+      person(2, '2', null, null),
+      person(4, '1,2', '콘텐츠가 부족함', 333333),
+      person(1, null, null, '044444'),
+    ];
+    const result = await loadSurvey(await makeXlsx(raw), questionFile);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.survey.notes).toEqual([]);
+    const analysis = analyzeSurvey(result.survey);
+    expect(analysis.questions.map((a) => [a.question.no, a.outcome.type])).toEqual([
+      [1, 'choice'],
+      [2, 'choice'],
+      [3, 'text'],
+    ]);
+    expect(analysis.excluded).toEqual([{ no: 4, reason: 'id-number' }]); // 사번 열은 지금처럼 뺀다
+    const q1 = analysis.questions[0].outcome;
+    const q2 = analysis.questions[1].outcome;
+    if (q1.type !== 'choice' || q2.type !== 'choice') throw new Error('객관식이어야 해요');
+    expect(q1.result.rows.map((r) => [r.label, r.count, r.percent])).toEqual([
+      ['1. 거의 매일', 1, 20],
+      ['2. 주 1~2회', 2, 40],
+      ['3. 월 1~2회', 1, 20],
+      ['4. 거의 활용하지 않음', 1, 20],
+    ]);
+    expect(q2.result.rows.map((r) => [r.label, r.count])).toEqual([
+      ['1. 사용 방법', 2],
+      ['2. 콘텐츠 부족', 2],
+      ['3. 시간 부족', 1],
+    ]);
+    expect([q2.result.totalSelections, q2.result.multiAnswerCount, q2.result.noAnswer]).toEqual([5, 2, 2]);
+  });
 
   it('예시 두 파일을 읽으면 문항 20개·응답자 40명이고, 문항 파일에 없는 열 21번만 알려 준다', async () => {
     const result = await loadSurvey(fixture('예시 원본.xlsx'), fixture('예시 문항.xlsx'));

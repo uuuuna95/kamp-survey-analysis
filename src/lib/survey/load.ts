@@ -3,7 +3,7 @@
 //
 // 브라우저에서 호출한다. 파일은 서버로 보내지 않는다.
 
-import { parseQuestions, parseResponses, readFirstSheetRows } from './parse';
+import { parseQuestions, parseResponses, readFirstSheet, readFirstSheetRows } from './parse';
 import type { ParsedResponses } from './parse';
 import type { Question } from './types';
 
@@ -60,10 +60,10 @@ const READ_FAILED = (label: string) =>
 export async function loadSurvey(rawData: Data, questionData: Data): Promise<LoadResult> {
   const errors: string[] = [];
 
-  let questionRows: unknown[][] = [];
+  let questionSheet: { rows: unknown[][]; bold: boolean[][] } = { rows: [], bold: [] };
   let rawRows: unknown[][] = [];
   try {
-    questionRows = await readFirstSheetRows(questionData);
+    questionSheet = await readFirstSheet(questionData);
   } catch {
     errors.push(READ_FAILED('설문 문항 파일'));
   }
@@ -74,13 +74,13 @@ export async function loadSurvey(rawData: Data, questionData: Data): Promise<Loa
   }
   if (errors.length > 0) return { ok: false, errors };
 
-  const parsedQuestions = parseQuestions(questionRows);
+  const parsedQuestions = parseQuestions(questionSheet.rows, questionSheet.bold);
   const responses = parseResponses(rawRows);
   const { questions } = parsedQuestions;
 
   if (questions.length === 0) {
     errors.push(
-      '설문 문항 파일에서 문항 번호와 질문을 찾지 못했어요. 문항 번호는 A열, 질문은 B열에 있고 그 아래 줄에 보기("1. 매우 그렇다")가 이어지는 파일이 맞는지 확인해 주세요.',
+      '설문 문항 파일에서 문항 번호와 질문을 찾지 못했어요. 문항 제목이 굵은 글씨로 "1. 질문"처럼 적혀 있고, 그 아래 줄마다 보기가 하나씩 이어지는 파일이 맞는지 확인해 주세요.',
     );
   }
   if (responses.respondents === 0 || responses.columns.length === 0) {

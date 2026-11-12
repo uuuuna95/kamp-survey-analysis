@@ -1,10 +1,11 @@
 // Design Ref: §3 ① 읽기 — 문항 파일(parseQuestions)과 엑셀 원본(parseResponses)을 읽는다.
 // Plan SC: SC-2 — 보기 번호는 "맨 왼쪽 아라비아 숫자"(예: "3. 보통이다"), 질문 끝 문구는 문항 유형 추정(작업 6)의 첫 번째 단서.
 //
-// 문항 파일 모양 (가정, tests/fixtures/정답표.md 참고):
-//   - 문항 줄: A열에 문항 번호, B열에 질문
-//   - 보기 줄: A열은 비어 있고, B열에 "3. 보통이다" 모양
-// 실제 KAMP 문항 파일 모양이 다르면 이 파일의 parseQuestions만 고치면 된다.
+// 문항 파일 모양 (실제 KAMP 문항 파일):
+//   - 문항 줄: 굵은 글씨로 "1. 질문" — 번호(1, 2…)가 엑셀 원본 열 제목 "문항번호1", "문항번호2"…의 숫자와 짝을 이룬다
+//   - 보기 줄: 문항 줄 아래 굵지 않은 글씨로 한 줄에 보기 하나. 위에서부터 1, 2, 3…번 보기(원본의 응답 숫자)
+//   - 주관식·서술형: 보기 줄 없이 바로 다음 굵은 글씨 문항 줄이 온다
+// 굵은 글씨 문항 줄이 없는 파일은 예전 모양(A열 문항 번호, B열 질문, 그 아래 B열 "3. 보통이다")으로 읽는다.
 //
 // 엑셀 원본 모양:
 //   - 첫 줄은 열 제목, 그 아래는 응답자 한 명당 한 줄
@@ -63,8 +64,91 @@ export function hasTextCue(title: string): boolean {
   return TEXT_CUES.some((cue) => compact.endsWith(cue));
 }
 
-/** 줄(행) 목록에서 문항을 읽는다. 줄은 [A열, B열, ...] 모양이다 */
-export function parseQuestions(rows: unknown[][]): ParsedQuestions {
+/** 굵은 글씨 문항 제목: "1. 질문", "12) 질문" (번호 뒤에 점·괄호가 오고 질문이 이어진다) */
+const BOLD_TITLE_RE = /^\s*(?:Q|q|문항)?\s*(\d+)\s*[.)．]\s*(\S.*)$/;
+
+/** 줄에서 첫 번째로 글이 있는 칸의 위치. 없으면 -1 */
+function firstFilledCell(row: unknown[]): number {
+  return row.findIndex((cell) => cellText(cell).trim() !== '');
+}
+
+/** 굵은 글씨 표시가 있고, 굵은 칸 중에 "1. 질문" 모양이 하나라도 있으면 굵은 글씨 모양의 문항 파일로 본다 */
+function isBoldLayout(rows: unknown[][], bold: boolean[][] | undefined): bold is boolean[][] {
+  if (!bold) return false;
+  return rows.some((row, r) => {
+    const c = firstFilledCell(row);
+    return c >= 0 && bold[r]?.[c] === true && BOLD_TITLE_RE.test(cellText(row[c]).trim());
+  });
+}
+
+/**
+ * 굵은 글씨 모양의 문항 파일을 읽는다 (실제 KAMP 문항 파일 모양).
+ *   - 문항 줄: 굵은 글씨로 "1. 질문" (번호 뒤의 글이 질문)
+ *   - 보기 줄: 문항 줄 아래 굵지 않은 글씨로 한 줄에 보기 하나. 보기 번호는 위에서부터 1, 2, 3…
+ *   - 주관식·서술형: 문항 줄 아래에 보기 없이 바로 다음 굵은 글씨 문항 줄이 온다
+ */
+function parseBoldQuestions(rows: unknown[][], bold: boolean[][]): ParsedQuestions {
+  const questions: Question[] = [];
+  const warnings: string[] = [];
+  const seen = new Set<number>();
+  let duplicateCount = 0;
+  let current: Question | null = null;
+  let skipping = false; // 중복 번호 문항의 보기 줄은 건너뛴다
+
+  rows.forEach((row, index) => {
+    const rowNo = index + 1;
+    const c = firstFilledCell(row);
+    if (c < 0) return;
+    const text = cellText(row[c]).trim();
+
+    if (bold[index]?.[c] === true) {
+      const match = BOLD_TITLE_RE.exec(text);
+      if (!match) {
+        // 번호가 없는 굵은 글씨: 첫 문항 앞이면 머리글, 그 뒤면 알림
+        if (current || skipping) warnings.push(`${rowNo}행: 굵은 글씨지만 "1. 질문" 모양이 아니라 읽지 못했어요 ("${text}").`);
+        current = null;
+        skipping = questions.length > 0;
+        return;
+      }
+      const no = Number(match[1]);
+      if (seen.has(no)) {
+        warnings.push(`${rowNo}행: 문항 번호 ${no}이(가) 중복돼요. 먼저 나온 문항만 사용해요.`);
+        duplicateCount++;
+        current = null;
+        skipping = true;
+        return;
+      }
+      seen.add(no);
+      skipping = false;
+      current = { no, title: match[2].trim(), options: [], endsWithTextCue: false };
+      questions.push(current);
+      return;
+    }
+
+    if (!current) return; // 첫 문항 앞의 제목·안내 글, 또는 건너뛰는 문항의 보기 줄
+    // 보기 줄: 위에서부터 1, 2, 3… 보기 앞에 같은 번호가 이미 적혀 있으면("3. 보통이다") 번호는 떼고 쓴다
+    const optionNo = current.options.length + 1;
+    const numbered = OPTION_RE.exec(text);
+    const label = numbered && Number(numbered[1]) === optionNo ? numbered[2].trim() : text;
+    current.options.push({ no: optionNo, label });
+  });
+
+  for (const q of questions) q.endsWithTextCue = hasTextCue(q.title);
+  return { questions, warnings, duplicateCount };
+}
+
+/**
+ * 문항 파일을 읽는다.
+ * bold(칸마다 굵은 글씨인지)를 주고 굵은 글씨 "1. 질문" 줄이 있으면 굵은 글씨 모양(parseBoldQuestions)으로 읽고,
+ * 아니면 예전 모양(A열 문항 번호, B열 질문, 그 아래 B열 "3. 보통이다")으로 읽는다.
+ */
+export function parseQuestions(rows: unknown[][], bold?: boolean[][]): ParsedQuestions {
+  if (isBoldLayout(rows, bold)) return parseBoldQuestions(rows, bold);
+  return parseNumberedQuestions(rows);
+}
+
+/** 예전 모양의 문항 파일: 줄은 [A열, B열, ...] 모양이다 */
+function parseNumberedQuestions(rows: unknown[][]): ParsedQuestions {
   const questions: Question[] = [];
   const warnings: string[] = [];
   const seen = new Set<number>();
@@ -215,19 +299,42 @@ export function parseResponses(rows: unknown[][]): ParsedResponses {
   return result;
 }
 
-/** 엑셀(.xlsx) 파일의 첫 번째 시트를 줄 목록으로 읽는다. 브라우저·Node 모두 쓸 수 있다 */
-export async function readFirstSheetRows(data: ArrayBuffer | Uint8Array): Promise<unknown[][]> {
+/** 칸이 굵은 글씨인가: 칸 전체가 굵거나, 서식 있는 글이면 글이 있는 부분이 모두 굵다 */
+function isBoldCell(cell: { font?: { bold?: boolean }; value: unknown }): boolean {
+  if (cell.font?.bold) return true;
+  const value = cell.value as { richText?: { text?: string; font?: { bold?: boolean } }[] } | null;
+  if (value && typeof value === 'object' && Array.isArray(value.richText)) {
+    const parts = value.richText.filter((part) => (part.text ?? '').trim() !== '');
+    return parts.length > 0 && parts.every((part) => part.font?.bold === true);
+  }
+  return false;
+}
+
+/** 첫 번째 시트의 줄 목록과, 칸마다 굵은 글씨인지를 함께 읽는다 */
+export async function readFirstSheet(data: ArrayBuffer | Uint8Array): Promise<{ rows: unknown[][]; bold: boolean[][] }> {
   const ExcelJS = (await import('exceljs')).default;
   const workbook = new ExcelJS.Workbook();
   await workbook.xlsx.load(data as unknown as Parameters<typeof workbook.xlsx.load>[0]);
   const sheet = workbook.worksheets[0];
-  if (!sheet) return [];
+  if (!sheet) return { rows: [], bold: [] };
   const rows: unknown[][] = [];
+  const bold: boolean[][] = [];
   for (let r = 1; r <= sheet.rowCount; r++) {
     const row = sheet.getRow(r);
     const cells: unknown[] = [];
-    for (let c = 1; c <= sheet.columnCount; c++) cells.push(row.getCell(c).value);
+    const flags: boolean[] = [];
+    for (let c = 1; c <= sheet.columnCount; c++) {
+      const cell = row.getCell(c);
+      cells.push(cell.value);
+      flags.push(isBoldCell(cell));
+    }
     rows.push(cells);
+    bold.push(flags);
   }
-  return rows;
+  return { rows, bold };
+}
+
+/** 엑셀(.xlsx) 파일의 첫 번째 시트를 줄 목록으로 읽는다. 브라우저·Node 모두 쓸 수 있다 */
+export async function readFirstSheetRows(data: ArrayBuffer | Uint8Array): Promise<unknown[][]> {
+  return (await readFirstSheet(data)).rows;
 }

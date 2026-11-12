@@ -413,10 +413,10 @@ async function writeQuestions() {
     ...textQuestions.map((q) => ({ no: q.no, title: q.title, options: [] })),
   ].sort((a, b) => a.no - b.no);
   for (const q of all) {
-    ws.addRow([q.no, q.title]); // 문항 줄: A=문항 번호, B=질문
-    q.options.forEach((label, i) => ws.addRow([null, `${i + 1}. ${label}`])); // 보기 줄: B="번호. 보기 내용"
+    ws.addRow([`${q.no}. ${q.title}`]).getCell(1).font = { bold: true }; // 문항 줄: 굵은 글씨 "번호. 질문"
+    q.options.forEach((label) => ws.addRow([label])); // 보기 줄: 한 줄에 보기 하나 (위에서부터 1, 2, 3…번)
   }
-  ws.getColumn(2).width = 60;
+  ws.getColumn(1).width = 70;
   await wb.xlsx.writeFile(QUESTION_FILE);
 }
 
@@ -435,8 +435,8 @@ function writeAnswerFiles() {
   md.push('  - A~G열: 참여일, 이름, 사번, 부서, 직급, 직위, 직책 (A열은 쓰지 않고, B~G열은 참여자 정보로 따로 읽음)');
   md.push('  - H열부터: 열 제목이 `문항번호1`, `문항번호2`… `문항번호20` (설문 문항 응답. 객관식은 보기 번호, 중복응답은 `1,3`, 직접 입력은 글, 주관식·서술형은 글)');
   md.push('  - 마지막 열 `문항번호21` (제출 일시): 문항 파일에 없는 번호의 열 (분석에서 빠져야 함)');
-  md.push('- **예시 문항.xlsx** — 문항 줄은 A열에 문항 번호, B열에 질문. 그 아래 보기 줄은 A열이 비어 있고 B열에 `3. 보통이다` 모양으로 적혀 있음. 문항 파일에는 문항 20개가 있음.');
-  md.push('- 이 모양은 설계 가정입니다. 실제 설문 시스템의 문항 파일 모양이 다르면 알려 주세요.');
+  md.push('- **예시 문항.xlsx** — A열 한 칸에 적혀 있음. 문항 줄은 굵은 글씨로 `1. 질문` 모양(번호가 엑셀 원본 `문항번호1`의 숫자와 짝). 그 아래 굵지 않은 줄마다 보기가 하나씩 있고, 위에서부터 1, 2, 3…번 보기(원본의 응답 숫자). 주관식·서술형은 보기 줄 없이 바로 다음 문항 줄이 이어짐. 문항 파일에는 문항 20개가 있음.');
+  md.push('- 이 모양은 사용자가 보내 준 실제 문항 파일 예시와 같은 모양입니다.');
   md.push('');
   md.push('## 세는 기준');
   md.push('');
@@ -563,13 +563,13 @@ async function verify() {
   const optionCounts = {};
   let current = null;
   qs.eachRow((row) => {
-    const a = row.getCell(1).value;
-    const b = row.getCell(2).value;
-    if (typeof a === 'number') {
+    const cell = row.getCell(1);
+    const match = cell.font?.bold ? /^(\d+)\. \S/.exec(String(cell.value)) : null;
+    if (match) {
       questionRows++;
-      current = a;
+      current = Number(match[1]);
       optionCounts[current] = 0;
-    } else if (typeof b === 'string' && /^\d+\. /.test(b)) {
+    } else if (typeof cell.value === 'string' && current !== null) {
       optionCounts[current]++;
     }
   });

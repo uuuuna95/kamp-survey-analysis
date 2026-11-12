@@ -156,7 +156,7 @@ export default function UploadPanel({ onLoaded, onReset }: UploadPanelProps) {
         />
         <FilePicker
           label="설문 문항 파일"
-          hint="문항 번호·질문과, 객관식이면 보기(“1. 매우 그렇다”)가 적힌 파일이에요."
+          hint="굵은 글씨로 “1. 질문”이 적히고, 객관식이면 그 아래 줄마다 보기가 하나씩(위에서부터 1, 2, 3…번) 이어지는 파일이에요."
           file={questionFile}
           error={questionError}
           disabled={busy}
